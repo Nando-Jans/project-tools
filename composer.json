@@ -15,6 +15,7 @@
         "symfony/dependency-injection": "^7.4 || ^8.0",
         "symfony/http-kernel": "^7.4 || ^8.0",
         "symfony/lock": "^7.4 || ^8.0",
+        "symfony/monolog-bundle": "^3.10 || ^4.0",
         "symfony/process": "^7.4 || ^8.0",
         "symfony/scheduler": "^7.4 || ^8.0",
         "symfony/yaml": "^7.4 || ^8.0"
