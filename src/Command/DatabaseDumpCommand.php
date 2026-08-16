@@ -69,10 +69,10 @@ final class DatabaseDumpCommand extends Command
                 $timestamp->format('Y-m-d_H-i-s'),
             );
 
-            $process = Process::fromShellCommandline(<<<'SHELL'
+            $process = new Process(['bash', '-o', 'pipefail', '-c', <<<'SHELL'
                 mariadb-dump \
-                    --host="${:DATABASE_HOST}" \
-                    --user="${:DATABASE_USER}" \
+                    --host="$DATABASE_HOST" \
+                    --user="$DATABASE_USER" \
                     --single-transaction \
                     --skip-ssl \
                     --quick \
@@ -80,9 +80,9 @@ final class DatabaseDumpCommand extends Command
                     --triggers \
                     --events \
                     --default-character-set=utf8mb4 \
-                    "${:DATABASE_NAME}" \
-                | gzip > "${:DUMP_FILE}"
-                SHELL);
+                    "$DATABASE_NAME" \
+                | gzip > "$1"
+                SHELL, 'database-dump', $filename]);
             $process->setTimeout(3600);
             $process->mustRun(null, [
                 'DATABASE_HOST' => $this->databaseHost,
@@ -92,9 +92,7 @@ final class DatabaseDumpCommand extends Command
                 'MYSQL_PWD' => $this->databasePassword,
             ]);
 
-            if (!is_file($filename) || filesize($filename) === 0) {
-                throw new \RuntimeException('The dump process completed without creating a valid dump file.');
-            }
+            $this->assertValidDump($filename);
 
             $this->removeOldDumps($dumpDirectory, 14);
             $this->removeExpiredDumps($dumpDirectory, 30);
@@ -107,6 +105,10 @@ final class DatabaseDumpCommand extends Command
 
             return Command::SUCCESS;
         } catch (ProcessFailedException $exception) {
+            if (isset($filename) && is_file($filename)) {
+                unlink($filename);
+            }
+
             $io->error(['Generating the database dump failed.', $exception->getProcess()->getErrorOutput()]);
 
             return Command::FAILURE;
@@ -116,6 +118,30 @@ final class DatabaseDumpCommand extends Command
             return Command::FAILURE;
         } finally {
             $lock->release();
+        }
+    }
+
+    private function assertValidDump(string $filename): void
+    {
+        if (!is_file($filename) || filesize($filename) === 0) {
+            throw new \RuntimeException('The dump process completed without creating a valid dump file.');
+        }
+
+        $process = new Process(['gzip', '-t', $filename]);
+        $process->mustRun();
+
+        $stream = gzopen($filename, 'rb');
+
+        if ($stream === false) {
+            throw new \RuntimeException(sprintf('Could not read database dump "%s".', $filename));
+        }
+
+        try {
+            if (gzread($stream, 1) === '') {
+                throw new \RuntimeException('The dump process created an empty database dump.');
+            }
+        } finally {
+            gzclose($stream);
         }
     }
 

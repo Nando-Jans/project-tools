@@ -166,27 +166,48 @@ final class DatabasePatchCommand extends Command
         $process->setTimeout(1800);
         $process->mustRun(static fn (string $type, string $buffer) => $io->write($buffer));
 
-        if (!is_file($localFilename) || filesize($localFilename) === 0) {
+        $this->assertValidDump($localFilename);
+    }
+
+    private function assertValidDump(string $filename): void
+    {
+        if (!is_file($filename) || filesize($filename) === 0) {
             throw new \RuntimeException('The downloaded dump file is empty or does not exist.');
+        }
+
+        $validationProcess = new Process(['gzip', '-t', $filename]);
+        $validationProcess->mustRun();
+
+        $stream = gzopen($filename, 'rb');
+
+        if ($stream === false) {
+            throw new \RuntimeException(sprintf('Could not read downloaded dump "%s".', $filename));
+        }
+
+        try {
+            if (gzread($stream, 1) === '') {
+                throw new \RuntimeException('The downloaded database dump contains no SQL.');
+            }
+        } finally {
+            gzclose($stream);
         }
     }
 
     private function importDump(string $filename, SymfonyStyle $io): void
     {
         $io->section('Importing database dump');
-        $process = Process::fromShellCommandline(<<<'SHELL'
-            gzip -dc "${:DUMP_FILE}" |
+        $process = new Process(['bash', '-o', 'pipefail', '-c', <<<'SHELL'
+            gzip -dc "$1" |
             mariadb \
-                --host="${:DATABASE_HOST}" \
-                --user="${:DATABASE_USER}" \
+                --host="$DATABASE_HOST" \
+                --user="$DATABASE_USER" \
                 --disable-ssl \
-                "${:DATABASE_NAME}"
-            SHELL, $this->projectDir);
+                "$DATABASE_NAME"
+            SHELL, 'database-patch', $filename], $this->projectDir);
         $process->setTimeout(3600);
         $process->mustRun(
             static fn (string $type, string $buffer) => $io->write($buffer),
             [
-                'DUMP_FILE' => $filename,
                 'DATABASE_HOST' => $this->databaseHost,
                 'DATABASE_NAME' => $this->databaseName,
                 'DATABASE_USER' => $this->databaseUser,
