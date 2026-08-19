@@ -52,6 +52,12 @@ final class DatabasePatchCommand extends Command
         $this
             ->addArgument('environment', InputArgument::REQUIRED, 'Remote environment: acc or prod.')
             ->addOption('non-anon', null, InputOption::VALUE_NONE, 'Download a non-anonymized database dump.')
+            ->addOption(
+                'document-location',
+                null,
+                InputOption::VALUE_REQUIRED | InputOption::VALUE_IS_ARRAY,
+                'Copy uploaded documents from REMOTE_PATH to LOCAL_PATH (REMOTE_PATH=LOCAL_PATH). May be repeated.',
+            )
             ->addOption('keep', null, InputOption::VALUE_NONE, 'Keep the downloaded dump after importing.')
             ->addOption('force', 'f', InputOption::VALUE_NONE, 'Import without asking for confirmation.');
     }
@@ -62,6 +68,10 @@ final class DatabasePatchCommand extends Command
 
         try {
             $remote = $this->getRemoteConfiguration(strtolower((string) $input->getArgument('environment')));
+            $documentLocations = array_map(
+                fn (mixed $location): array => $this->parseDocumentLocation((string) $location),
+                $input->getOption('document-location'),
+            );
         } catch (\InvalidArgumentException $exception) {
             $io->error($exception->getMessage());
 
@@ -92,6 +102,17 @@ final class DatabasePatchCommand extends Command
             $localFilename = $localDirectory . '/' . basename($remoteFilename);
             $this->downloadDump($remote['host'], $remote['user'], $remoteFilename, $localFilename, $io);
             $this->importDump($localFilename, $io);
+            $this->runMigrations($io);
+
+            foreach ($documentLocations as [$remoteDirectory, $localDocumentDirectory]) {
+                $this->copyDocuments(
+                    $remote['host'],
+                    $remote['user'],
+                    $remoteDirectory,
+                    $localDocumentDirectory,
+                    $io,
+                );
+            }
 
             if (!$input->getOption('keep') && is_file($localFilename) && !unlink($localFilename)) {
                 throw new \RuntimeException(sprintf('Could not delete downloaded dump "%s".', $localFilename));
@@ -214,6 +235,68 @@ final class DatabasePatchCommand extends Command
                 'MYSQL_PWD' => $this->databasePassword,
             ],
         );
+    }
+
+    private function runMigrations(SymfonyStyle $io): void
+    {
+        $io->section('Running database migrations');
+        $process = new Process([
+            PHP_BINARY,
+            $this->projectDir . '/bin/console',
+            'doctrine:migrations:migrate',
+            '--no-interaction',
+        ], $this->projectDir);
+        $process->setTimeout(3600);
+        $process->mustRun(static fn (string $type, string $buffer) => $io->write($buffer));
+    }
+
+    /** @return array{string, string} */
+    private function parseDocumentLocation(string $location): array
+    {
+        $separatorPosition = strpos($location, '=');
+
+        if ($separatorPosition === false) {
+            throw new \InvalidArgumentException(sprintf(
+                'Invalid document location "%s". Expected REMOTE_PATH=LOCAL_PATH.',
+                $location,
+            ));
+        }
+
+        $remoteDirectory = rtrim(substr($location, 0, $separatorPosition), '/');
+        $localDirectory = rtrim(substr($location, $separatorPosition + 1), '/');
+
+        if ($remoteDirectory === '' || $localDirectory === '') {
+            throw new \InvalidArgumentException(sprintf(
+                'Invalid document location "%s". Both paths must be non-empty.',
+                $location,
+            ));
+        }
+
+        if (!str_starts_with($localDirectory, '/')) {
+            $localDirectory = $this->projectDir . '/' . $localDirectory;
+        }
+
+        return [$remoteDirectory, $localDirectory];
+    }
+
+    private function copyDocuments(
+        string $sshHost,
+        string $sshUser,
+        string $remoteDirectory,
+        string $localDirectory,
+        SymfonyStyle $io,
+    ): void {
+        $io->section(sprintf('Copying uploaded documents to %s', $localDirectory));
+        $this->createDirectory($localDirectory);
+
+        $process = new Process([
+            'scp',
+            '-r',
+            sprintf('%s@%s:%s/.', $sshUser, $sshHost, $remoteDirectory),
+            $localDirectory,
+        ], $this->projectDir);
+        $process->setTimeout(3600);
+        $process->mustRun(static fn (string $type, string $buffer) => $io->write($buffer));
     }
 
     /** @return array{host: string, user: string, directory: string} */
