@@ -16,7 +16,7 @@ use Symfony\Component\Process\Process;
 
 #[AsCommand(
     name: 'app:database:patch',
-    description: 'Downloads the latest database dump and imports it locally.',
+    description: 'Imports the latest database dump locally or into another remote environment.',
 )]
 final class DatabasePatchCommand extends Command
 {
@@ -51,6 +51,8 @@ final class DatabasePatchCommand extends Command
     {
         $this
             ->addArgument('environment', InputArgument::REQUIRED, 'Remote environment: acc or prod.')
+            ->addOption('target', null, InputOption::VALUE_REQUIRED, 'Destination: local, acc or prod.', 'local')
+            ->addOption('target-project-dir', null, InputOption::VALUE_REQUIRED, 'Absolute application directory on the destination server (required for remote targets).')
             ->addOption('non-anon', null, InputOption::VALUE_NONE, 'Download a non-anonymized database dump.')
             ->addOption(
                 'document-location',
@@ -59,7 +61,7 @@ final class DatabasePatchCommand extends Command
                 'Copy uploaded documents from REMOTE_PATH to LOCAL_PATH (REMOTE_PATH=LOCAL_PATH). May be repeated.',
             )
             ->addOption('keep', null, InputOption::VALUE_NONE, 'Keep the downloaded dump after importing.')
-            ->addOption('force', 'f', InputOption::VALUE_NONE, 'Import without asking for confirmation.');
+            ->addOption('force', 'f', InputOption::VALUE_NONE, 'Import locally without asking for confirmation; ignored for remote targets.');
     }
 
     protected function execute(InputInterface $input, OutputInterface $output): int
@@ -68,6 +70,11 @@ final class DatabasePatchCommand extends Command
 
         try {
             $remote = $this->getRemoteConfiguration(strtolower((string) $input->getArgument('environment')));
+            $target = strtolower((string) $input->getOption('target'));
+            if ($target !== 'local') {
+                return $this->patchRemote($input, $io, $target);
+            }
+
             $documentLocations = array_map(
                 fn (mixed $location): array => $this->parseDocumentLocation((string) $location),
                 $input->getOption('document-location'),
@@ -119,6 +126,75 @@ final class DatabasePatchCommand extends Command
             }
 
             $io->success(sprintf('Database "%s" was patched successfully.', $this->databaseName));
+
+            return Command::SUCCESS;
+        } catch (\Throwable $exception) {
+            $io->error($exception->getMessage());
+
+            return Command::FAILURE;
+        }
+    }
+
+    private function patchRemote(InputInterface $input, SymfonyStyle $io, string $target): int
+    {
+        $destination = $this->getRemoteConfiguration($target);
+        $source = strtolower((string) $input->getArgument('environment'));
+        if ($source === $target) {
+            throw new \InvalidArgumentException('Source and destination environments must be different.');
+        }
+
+        $projectDirectory = (string) $input->getOption('target-project-dir');
+        if (!str_starts_with($projectDirectory, '/') || str_contains($projectDirectory, "\0")) {
+            throw new \InvalidArgumentException('Remote targets require an absolute --target-project-dir.');
+        }
+        if ($input->getOption('document-location') !== []) {
+            throw new \InvalidArgumentException('--document-location is only supported for local imports.');
+        }
+        if (!$input->isInteractive()) {
+            $io->error('Remote database copies require interactive confirmation.');
+
+            return Command::INVALID;
+        }
+
+        $targetLabel = $target === 'prod' ? 'PRODUCTION' : 'accept';
+        $io->warning(sprintf(
+            'The latest %s dump from %s will overwrite the database configured in %s on %s (%s).',
+            $input->getOption('non-anon') ? 'non-anonymized' : 'anonymized',
+            $source,
+            $projectDirectory,
+            $destination['host'],
+            $targetLabel,
+        ));
+        if (!$io->confirm(sprintf('Copy %s to %s. Are you sure?', $source, $targetLabel), false)
+            || ($target === 'prod' && !$io->confirm(
+                'Final confirmation: existing PRODUCTION data will be overwritten. Are you absolutely sure?',
+                false,
+            ))) {
+            $io->warning('Database patch cancelled.');
+
+            return Command::SUCCESS;
+        }
+
+        // The destination uses its own database credentials and source SSH configuration.
+        // Only the local import is forced: the operator has confirmed the remote copy above.
+        $arguments = ['php', 'bin/console', 'app:database:patch', $source, '--force', '--no-interaction'];
+        foreach (['non-anon', 'keep'] as $option) {
+            if ($input->getOption($option)) {
+                $arguments[] = '--' . $option;
+            }
+        }
+        $remoteCommand = 'cd ' . escapeshellarg($projectDirectory) . ' && '
+            . implode(' ', array_map('escapeshellarg', $arguments));
+
+        try {
+            $process = new Process([
+                'ssh', '-o', 'BatchMode=yes',
+                sprintf('%s@%s', $destination['user'], $destination['host']),
+                $remoteCommand,
+            ]);
+            $process->setTimeout(10800);
+            $process->mustRun(static fn (string $type, string $buffer) => $io->write($buffer));
+            $io->success(sprintf('Database copy from %s to %s completed.', $source, $targetLabel));
 
             return Command::SUCCESS;
         } catch (\Throwable $exception) {
