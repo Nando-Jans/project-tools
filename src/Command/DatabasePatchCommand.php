@@ -294,24 +294,24 @@ final class DatabasePatchCommand extends Command
     private function dropDatabase(SymfonyStyle $io): void
     {
         $io->section('Dropping database');
-        $process = new Process([<<<'SHELL'
-            gzip -dc "$1" |
-            mariadb \
-                --host="$DATABASE_HOST" \
-                --user="$DATABASE_USER" \
-                --disable-ssl \
-                -e 'DROP DATABASE `$DATABASE_NAME`;'
-            SHELL]);
+        $process = new Process([
+            'mariadb',
+            '--host='.$this->databaseHost,
+            '--user='.$this->databaseUser,
+            '--disable-ssl',
+            '-e',
+            sprintf('DROP DATABASE `%s`;', $this->databaseName),
+        ]);
+
         $process->setTimeout(3600);
-        $process->run(
+
+        $process->mustRun(
             static fn (string $type, string $buffer) => $io->write($buffer),
             [
-                'DATABASE_HOST' => $this->databaseHost,
-                'DATABASE_NAME' => $this->databaseName,
-                'DATABASE_USER' => $this->databaseUser,
                 'MYSQL_PWD' => $this->databasePassword,
-            ]
+            ],
         );
+
         $io->success('Database dropped');
     }
 
