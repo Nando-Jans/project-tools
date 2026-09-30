@@ -108,6 +108,7 @@ final class DatabasePatchCommand extends Command
 
             $localFilename = $localDirectory . '/' . basename($remoteFilename);
             $this->downloadDump($remote['host'], $remote['user'], $remoteFilename, $localFilename, $io);
+            $this->dropDatabase($io);
             $this->importDump($localFilename, $io);
             $this->runMigrations($io);
 
@@ -290,6 +291,30 @@ final class DatabasePatchCommand extends Command
         }
     }
 
+    private function dropDatabase(SymfonyStyle $io): void
+    {
+        $io->section('Dropping database');
+        $process = new Process([<<<'SHELL'
+            gzip -dc "$1" |
+            mariadb \
+                --host="$DATABASE_HOST" \
+                --user="$DATABASE_USER" \
+                --disable-ssl \
+                -e 'DROP DATABASE `$DATABASE_NAME`;'
+            SHELL]);
+        $process->setTimeout(3600);
+        $process->run(
+            static fn (string $type, string $buffer) => $io->write($buffer),
+            [
+                'DATABASE_HOST' => $this->databaseHost,
+                'DATABASE_NAME' => $this->databaseName,
+                'DATABASE_USER' => $this->databaseUser,
+                'MYSQL_PWD' => $this->databasePassword,
+            ]
+        );
+        $io->success('Database dropped');
+    }
+
     private function importDump(string $filename, SymfonyStyle $io): void
     {
         $io->section('Importing database dump');
@@ -311,6 +336,7 @@ final class DatabasePatchCommand extends Command
                 'MYSQL_PWD' => $this->databasePassword,
             ],
         );
+        $io->success('Database imported');
     }
 
     private function runMigrations(SymfonyStyle $io): void
