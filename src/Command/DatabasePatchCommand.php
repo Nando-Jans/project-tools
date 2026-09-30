@@ -109,6 +109,7 @@ final class DatabasePatchCommand extends Command
             $localFilename = $localDirectory . '/' . basename($remoteFilename);
             $this->downloadDump($remote['host'], $remote['user'], $remoteFilename, $localFilename, $io);
             $this->dropDatabase($io);
+            $this->createDatabase($io);
             $this->importDump($localFilename, $io);
             $this->runMigrations($io);
 
@@ -300,7 +301,7 @@ final class DatabasePatchCommand extends Command
             '--user='.$this->databaseUser,
             '--disable-ssl',
             '-e',
-            sprintf('DROP DATABASE `%s`;', $this->databaseName),
+            sprintf('DROP DATABASE IF EXISTS `%s`;', $this->databaseName),
         ]);
 
         $process->setTimeout(3600);
@@ -313,6 +314,30 @@ final class DatabasePatchCommand extends Command
         );
 
         $io->success('Database dropped');
+    }
+
+    private function createDatabase(SymfonyStyle $io): void
+    {
+        $io->section('Creating database');
+        $process = new Process([
+            'mariadb',
+            '--host='.$this->databaseHost,
+            '--user='.$this->databaseUser,
+            '--disable-ssl',
+            '-e',
+            sprintf('CREATE DATABASE `%s`;', $this->databaseName),
+        ]);
+
+        $process->setTimeout(3600);
+
+        $process->mustRun(
+            static fn (string $type, string $buffer) => $io->write($buffer),
+            [
+                'MYSQL_PWD' => $this->databasePassword,
+            ],
+        );
+
+        $io->success('Database created');
     }
 
     private function importDump(string $filename, SymfonyStyle $io): void
